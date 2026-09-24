@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitcoin Price Predictor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/DrawSVGPlugin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/SplitText.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lenis@1.3.11/dist/lenis.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<!-- Loader -->
+<div id="loader">
+  <svg viewBox="0 0 120 120" class="loader-ring">
+    <circle cx="60" cy="60" r="52" class="track"/>
+    <circle cx="60" cy="60" r="52" class="bar" id="loaderBar"/>
+    <path id="loaderB" d="M48 36 h18 a12 12 0 0 1 0 24 h-18 z M48 60 h21 a12 12 0 0 1 0 24 h-21 z M48 36 v48 M53 30 v6 M61 30 v6 M53 84 v6 M61 84 v6"/>
+  </svg>
+  <div class="loader-count mono"><span id="loaderNum">0</span>%</div>
+</div>
+
+<canvas id="webgl"></canvas>
+<div class="cursor" id="cursor"></div>
+<div class="cursor-dot" id="cursorDot"></div>
+
+<header class="nav">
+  <a href="#hero" class="brand"><span class="brand-mark">₿</span> BTC·Predict</a>
+  <nav>
+    <a href="#accuracy">Accuracy</a><a href="#predict">Predict</a><a href="#backtest">Backtest</a><a href="#models">Models</a><a href="#pipeline">How it works</a>
+  </nav>
+  <div class="nav-progress"><span id="navProgress"></span></div>
+</header>
+
+<main>
+  <!-- HERO -->
+  <section id="hero" class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow mono reveal-up">ML PROJECT · SEM 5 · {{ first[:4] }}–{{ last[:4] }} DATA</p>
+      <h1 class="hero-title" id="heroTitle">Predict the<br><span class="accent">Bitcoin</span> price</h1>
+      <p class="hero-sub reveal-up">A machine-learning model trained on 7.6 million minutes of BTC/USD history.
+        Pick any date and it forecasts the closing price, with an honest range around it.</p>
+      <div class="hero-cta reveal-up">
+        <a href="#predict" class="btn magnetic"><span>Make a prediction</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        <a href="#accuracy" class="btn ghost magnetic"><span>See accuracy</span></a>
+      </div>
+      <div class="hero-ticker mono reveal-up">
+        <div><span class="k">Last close</span><span class="v" id="tLast">—</span></div>
+        <div><span class="k">As of</span><span class="v">{{ last }}</span></div>
+        <div><span class="k">Model</span><span class="v" id="tModel">—</span></div>
+      </div>
+    </div>
+    <div class="scroll-hint mono"><span>SCROLL</span>
+      <svg viewBox="0 0 20 60"><path id="scrollLine" d="M10 0 V60"/></svg></div>
+  </section>
+
+  <!-- MARQUEE -->
+  <div class="marquee" aria-hidden="true"><div class="marquee-track mono" id="marquee"></div></div>
+
+  <!-- ACCURACY -->
+  <section id="accuracy" class="section">
+    <div class="section-head">
+      <p class="eyebrow mono">01 — Model accuracy</p>
+      <h2 class="split">How good is the model?</h2>
+      <p class="lead">Measured on data the model never saw during training: every day from 1 Jan 2025 to June 2026.</p>
+    </div>
+    <div class="gauges" id="gauges"></div>
+    <div class="callout glass reveal-up">
+      <svg viewBox="0 0 24 24" class="callout-icon"><path d="M12 3 2 21h20L12 3zm0 6v5m0 3v.5"/></svg>
+      <p><b>Reading these numbers honestly:</b> price accuracy is high because Bitcoin rarely moves more than a few
+        percent in a day, so "tomorrow ≈ today" is already a strong guess. The harder question is whether the price
+        goes <i>up or down</i>, and there the model is right about <b id="dirInline">half</b> the time, the same as a
+        coin flip. Treat this as a data-science study, not trading advice.</p>
+    </div>
+  </section>
+
+  <!-- PREDICT -->
+  <section id="predict" class="section">
+    <div class="section-head">
+      <p class="eyebrow mono">02 — Forecast</p>
+      <h2 class="split">Pick a date. Get a price.</h2>
+      <p class="lead">Past dates show the model's next-day prediction next to the real price. Future dates (up to
+        365 days after {{ last }}) run <b>300 Monte Carlo simulations</b>: the model supplies each day's expected
+        move and random shocks the size of recent volatility are added on top.</p>
+    </div>
+
+    <div class="predict-grid">
+      <form id="predictForm" class="glass form-card">
+        <label for="dt" class="mono">DATE &amp; TIME</label>
+        <input type="datetime-local" id="dt" required>
+        <div class="chips">
+          <button type="button" class="chip" data-days="-365">1y ago</button>
+          <button type="button" class="chip" data-days="30">+30 days</button>
+          <button type="button" class="chip" data-days="90">+90 days</button>
+          <button type="button" class="chip" data-days="180">+6 months</button>
+          <button type="button" class="chip" data-days="365">+1 year</button>
+        </div>
+        <button type="submit" class="btn wide magnetic" id="predictBtn"><span>Run prediction</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+        <p class="fine">Range: {{ first }} → one year after {{ last }}. Predictions are for the daily close (UTC).</p>
+      </form>
+
+      <div class="glass result-card" id="resultCard">
+        <div class="result-empty" id="resultEmpty">
+          <svg viewBox="0 0 200 80" class="empty-svg"><path id="emptyPath" d="M0 60 C 30 60, 40 20, 70 30 S 110 70, 130 40 S 170 10, 200 20"/></svg>
+          <p>Choose a date and run a prediction to see the forecast here.</p>
+        </div>
+        <div class="result-body hidden" id="resultBody">
+          <p class="result-label mono" id="rLabel"></p>
+          <div class="result-price"><span class="mono">$</span><span id="rPrice">0</span></div>
+          <div class="result-stats" id="rStats"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="glass chart-card">
+      <div class="chart-legend mono" id="fLegend"></div>
+      <svg id="forecastChart" class="chart" preserveAspectRatio="none"></svg>
+      <div class="tooltip mono" id="fTip"></div>
+    </div>
+  </section>
+
+  <!-- BACKTEST -->
+  <section id="backtest" class="section">
+    <div class="section-head">
+      <p class="eyebrow mono">03 — Backtest</p>
+      <h2 class="split">Predicted vs. actual, day by day</h2>
+      <p class="lead">Each orange point is a prediction made using only data up to the previous day. Scroll to draw it.</p>
+    </div>
+    <div class="glass chart-card tall">
+      <div class="chart-legend mono">
+        <span><i style="background:var(--muted)"></i>Actual</span><span><i style="background:var(--accent)"></i>Predicted</span>
+      </div>
+      <svg id="backtestChart" class="chart" preserveAspectRatio="none"></svg>
+      <div class="tooltip mono" id="bTip"></div>
+    </div>
+    <div class="err-grid">
+      <div class="glass err-card"><p class="mono k">Error distribution (% of price)</p><svg id="errHist" class="mini"></svg></div>
+      <div class="glass err-card"><p class="mono k">Days within ±1% / ±2% / ±5%</p><div id="within"></div></div>
+    </div>
+  </section>
+
+  <!-- MODELS -->
+  <section id="models" class="section">
+    <div class="section-head">
+      <p class="eyebrow mono">04 — Model comparison</p>
+      <h2 class="split">Four models, one test set</h2>
+      <p class="lead">Lower error is better. The best trained model is used on this site.</p>
+    </div>
+    <div class="glass table-card"><table id="modelTable"></table></div>
+  </section>
+
+  <!-- PIPELINE (pinned horizontal scroll) -->
+  <section id="pipeline" class="pipeline">
+    <div class="pipe-head">
+      <p class="eyebrow mono">05 — How it works</p>
+      <h2 class="split">From raw minutes to a forecast</h2>
+    </div>
+    <div class="pipe-track" id="pipeTrack">
+      <svg class="pipe-line" id="pipeSvg" preserveAspectRatio="none"><path id="pipePath"/></svg>
+      <div class="step glass"><span class="num mono">01</span><h3>Collect</h3><p>7,616,181 one-minute OHLCV candles, Jan 2012 → Jun 2026. No missing values, no duplicates.</p></div>
+      <div class="step glass"><span class="num mono">02</span><h3>Resample</h3><p>Grouped into 5,290 daily candles to cut the noise and keep the long-term trend.</p></div>
+      <div class="step glass"><span class="num mono">03</span><h3>Engineer</h3><p>12 features from past prices only: lagged log-returns, distance from 7/30/90-day averages, volatility, momentum.</p></div>
+      <div class="step glass"><span class="num mono">04</span><h3>Train</h3><p>Target is the next day's log-return. Trained on 2012–2024, tested on 2025–2026 with a strict time split.</p></div>
+      <div class="step glass"><span class="num mono">05</span><h3>Forecast</h3><p>One step for past dates; for future dates, 300 Monte Carlo paths give a median and a 50% / 90% range.</p></div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <h2 class="split big">Built with Python, scikit-learn, Flask, Three.js &amp; GSAP.</h2>
+    <p class="mono fine">Semester 5 · Machine Learning Project · Not financial advice.</p>
+  </footer>
+</main>
+
+<script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
