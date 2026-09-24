@@ -21,7 +21,7 @@ close = daily["Close"]
 FIRST_DATE = close.index.min() + pd.Timedelta(days=91)  # need 90 days of history for features
 LAST_DATE = close.index.max()
 MAX_HORIZON = 365
-N_SIMS = 300
+N_SIMS = 100
 WINDOW = 91  # closes needed to build one feature row
 # Shock size for simulations: last year's daily log-return volatility (early-era Bitcoin
 # was far more volatile, so the all-history residual std would exaggerate the spread)

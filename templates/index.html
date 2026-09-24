@@ -92,7 +92,7 @@
       <p class="eyebrow mono">02 — Forecast</p>
       <h2 class="split">Pick a date. Get a price.</h2>
       <p class="lead">Past dates show the model's next-day prediction next to the real price. Future dates (up to
-        365 days after {{ last }}) run <b>300 Monte Carlo simulations</b>: the model supplies each day's expected
+        365 days after {{ last }}) run <b>100 Monte Carlo simulations</b>: the model supplies each day's expected
         move and random shocks the size of recent volatility are added on top.</p>
     </div>
 
@@ -174,7 +174,7 @@
       <div class="step glass"><span class="num mono">02</span><h3>Resample</h3><p>Grouped into 5,290 daily candles to cut the noise and keep the long-term trend.</p></div>
       <div class="step glass"><span class="num mono">03</span><h3>Engineer</h3><p>12 features from past prices only: lagged log-returns, distance from 7/30/90-day averages, volatility, momentum.</p></div>
       <div class="step glass"><span class="num mono">04</span><h3>Train</h3><p>Target is the next day's log-return. Trained on 2012–2024, tested on 2025–2026 with a strict time split.</p></div>
-      <div class="step glass"><span class="num mono">05</span><h3>Forecast</h3><p>One step for past dates; for future dates, 300 Monte Carlo paths give a median and a 50% / 90% range.</p></div>
+      <div class="step glass"><span class="num mono">05</span><h3>Forecast</h3><p>One step for past dates; for future dates, 100 Monte Carlo paths give a median and a 50% / 90% range.</p></div>
     </div>
   </section>
 
