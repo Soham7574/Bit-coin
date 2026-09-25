@@ -38,7 +38,7 @@
 <header class="nav">
   <a href="#hero" class="brand"><span class="brand-mark">₿</span> BTC·Predict</a>
   <nav>
-    <a href="#accuracy">Accuracy</a><a href="#predict">Predict</a><a href="#backtest">Backtest</a><a href="#models">Models</a><a href="#pipeline">How it works</a>
+    <a href="#accuracy">Accuracy</a><a href="#predict">Predict</a><a href="#backtest">Backtest</a><a href="#models">Models</a><a href="#evaluation">Evaluation</a><a href="#pipeline">How it works</a>
   </nav>
   <div class="nav-progress"><span id="navProgress"></span></div>
 </header>
@@ -74,7 +74,9 @@
     <div class="section-head">
       <p class="eyebrow mono">01 — Model accuracy</p>
       <h2 class="split">How good is the model?</h2>
-      <p class="lead">Measured on data the model never saw during training: every day from 1 Jan 2025 to June 2026.</p>
+      <p class="lead">Measured on data the models never saw during training: every day from 1 Jan 2025 to June 2026.
+        Pick a model to see its scores.</p>
+      <div class="model-switch"></div>
     </div>
     <div class="gauges" id="gauges"></div>
     <div class="callout glass reveal-up">
@@ -98,6 +100,8 @@
 
     <div class="predict-grid">
       <form id="predictForm" class="glass form-card">
+        <span class="mono form-label">MODEL</span>
+        <div class="model-switch"></div>
         <label for="dt" class="mono">DATE &amp; TIME</label>
         <input type="datetime-local" id="dt" required>
         <div class="chips">
@@ -137,11 +141,13 @@
     <div class="section-head">
       <p class="eyebrow mono">03 — Backtest</p>
       <h2 class="split">Predicted vs. actual, day by day</h2>
-      <p class="lead">Each orange point is a prediction made using only data up to the previous day. Scroll to draw it.</p>
+      <p class="lead">Each predicted point is made using only data up to the previous day. Scroll to draw it,
+        or switch models to compare.</p>
+      <div class="model-switch"></div>
     </div>
     <div class="glass chart-card tall">
       <div class="chart-legend mono">
-        <span><i style="background:var(--muted)"></i>Actual</span><span><i style="background:var(--accent)"></i>Predicted</span>
+        <span><i style="background:var(--muted)"></i>Actual</span><span id="btPredLegend"><i style="background:var(--accent)"></i>Predicted</span>
       </div>
       <svg id="backtestChart" class="chart" preserveAspectRatio="none"></svg>
       <div class="tooltip mono" id="bTip"></div>
@@ -156,16 +162,35 @@
   <section id="models" class="section">
     <div class="section-head">
       <p class="eyebrow mono">04 — Model comparison</p>
-      <h2 class="split">Four models, one test set</h2>
-      <p class="lead">Lower error is better. The best trained model is used on this site.</p>
+      <h2 class="split">Three models, one test set</h2>
+      <p class="lead">Lower error is better. Random Forest is the default; click a row to make predictions with another model.</p>
     </div>
     <div class="glass table-card"><table id="modelTable"></table></div>
+  </section>
+
+  <!-- EVALUATION DASHBOARD: the three selectable models (data from /api/meta) -->
+  <section id="evaluation" class="section">
+    <div class="section-head">
+      <p class="eyebrow mono">05 — Evaluation dashboard</p>
+      <h2 class="split">Three models, cross-validated</h2>
+      <p class="lead">Random Forest, Ridge Regression and Linear Regression, compared on 2025–2026 test data and with
+        5-fold time-series cross-validation. "Up" means the model predicted a price rise for the next day.
+        The selected model is highlighted.</p>
+      <div class="model-switch"></div>
+    </div>
+    <div class="eval-grid" id="evalGrid">
+      <div class="glass eval-card"><p class="mono k">1 · Direction accuracy (test)</p><svg id="evAcc" class="ev-svg"></svg></div>
+      <div class="glass eval-card"><p class="mono k">2 · Precision · Recall · F1</p><div class="ev-legend mono" id="evPrfLegend"></div><svg id="evPrf" class="ev-svg"></svg></div>
+      <div class="glass eval-card"><p class="mono k">3 · Confusion matrix · <span id="evCmModel"></span></p><div class="cm" id="evCm"></div></div>
+      <div class="glass eval-card"><p class="mono k">4 · ROC curve &amp; AUC</p><svg id="evRoc" class="ev-svg roc"></svg><div class="ev-legend mono" id="evRocLegend"></div></div>
+      <div class="glass eval-card"><p class="mono k">5 · 5-fold CV spread (direction accuracy)</p><svg id="evCv" class="ev-svg"></svg></div>
+    </div>
   </section>
 
   <!-- PIPELINE (pinned horizontal scroll) -->
   <section id="pipeline" class="pipeline">
     <div class="pipe-head">
-      <p class="eyebrow mono">05 — How it works</p>
+      <p class="eyebrow mono">06 — How it works</p>
       <h2 class="split">From raw minutes to a forecast</h2>
     </div>
     <div class="pipe-track" id="pipeTrack">
@@ -173,7 +198,7 @@
       <div class="step glass"><span class="num mono">01</span><h3>Collect</h3><p>7,616,181 one-minute OHLCV candles, Jan 2012 → Jun 2026. No missing values, no duplicates.</p></div>
       <div class="step glass"><span class="num mono">02</span><h3>Resample</h3><p>Grouped into 5,290 daily candles to cut the noise and keep the long-term trend.</p></div>
       <div class="step glass"><span class="num mono">03</span><h3>Engineer</h3><p>12 features from past prices only: lagged log-returns, distance from 7/30/90-day averages, volatility, momentum.</p></div>
-      <div class="step glass"><span class="num mono">04</span><h3>Train</h3><p>Target is the next day's log-return. Trained on 2012–2024, tested on 2025–2026 with a strict time split.</p></div>
+      <div class="step glass"><span class="num mono">04</span><h3>Train</h3><p>Random Forest, Ridge and Linear Regression learn the next day's log-return. Trained on 2012–2024, tested on 2025–2026 with a strict time split.</p></div>
       <div class="step glass"><span class="num mono">05</span><h3>Forecast</h3><p>One step for past dates; for future dates, 100 Monte Carlo paths give a median and a 50% / 90% range.</p></div>
     </div>
   </section>

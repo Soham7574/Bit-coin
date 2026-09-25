@@ -9,13 +9,16 @@ from train_model import make_features, LAGS, MA_WINDOWS, VOL_WINDOWS
 
 app = Flask(__name__)
 
-model = joblib.load("model.pkl")
-if hasattr(model, "n_jobs"):
-    model.n_jobs = 1  # small predictions are faster without worker threads
 info = json.load(open("model_info.json"))
-backtest = json.load(open("backtest.json"))
 FEATURES = info["features"]
-RESID_STD = info["resid_std"]
+DEFAULT_MODEL = info["default_model"]
+# The three selectable models: Random Forest (default), Ridge Regression, Linear Regression
+MODELS = {key: joblib.load(f"models/{key}.pkl") for key in info["models"]}
+for m in MODELS.values():
+    if hasattr(m, "n_jobs"):
+        m.n_jobs = 1  # small predictions are faster without worker threads
+RESID_STD = {key: m["resid_std"] for key, m in info["models"].items()}
+
 daily = pd.read_csv("daily_data.csv", index_col=0, parse_dates=True)
 close = daily["Close"]
 FIRST_DATE = close.index.min() + pd.Timedelta(days=91)  # need 90 days of history for features
@@ -32,7 +35,7 @@ def fmt(ts):
     return ts.strftime("%Y-%m-%d")
 
 
-def predict_next(history: pd.Series) -> float:
+def predict_next(model, history: pd.Series) -> float:
     """Predict the close price for the day after the last day in `history`."""
     feats = make_features(history.iloc[-120:]).iloc[[-1]][FEATURES]
     return float(history.iloc[-1] * np.exp(model.predict(feats)[0]))
@@ -54,7 +57,7 @@ def batch_features(paths: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(f)[FEATURES]
 
 
-def simulate(horizon: int, seed: int = 7) -> np.ndarray:
+def simulate(model, horizon: int, seed: int = 7) -> np.ndarray:
     """Monte Carlo forecast: at each step the model predicts the expected return for every
     path, then a random shock drawn from a fat-tailed Student-t (df=4) scaled to
     recent daily volatility is added. Returns (N_SIMS, horizon) simulated closes."""
@@ -84,15 +87,22 @@ def index():
 @app.route("/api/meta")
 def meta():
     weekly = close.resample("W").last().dropna()
+    models = {k: {kk: vv for kk, vv in m.items() if kk != "resid_std"} for k, m in info["models"].items()}
     return jsonify(
-        best_model=info["best_model"], results=info["results"], last_date=fmt(LAST_DATE),
-        first_date=fmt(FIRST_DATE), last_close=float(close.iloc[-1]), n_days=int(len(close)),
-        backtest=backtest, weekly=series(weekly),
+        default_model=DEFAULT_MODEL, models=models, model_order=list(info["models"]),
+        backtest_dates=info["backtest"]["dates"], backtest_actual=info["backtest"]["actual"],
+        split=info["split"], last_date=fmt(LAST_DATE), first_date=fmt(FIRST_DATE),
+        last_close=float(close.iloc[-1]), n_days=int(len(close)), weekly=series(weekly),
     )
 
 
 @app.route("/predict")
 def predict():
+    key = request.args.get("model", DEFAULT_MODEL)
+    if key not in MODELS:
+        return jsonify(error="Unknown model. Choose Random Forest, Ridge Regression or Linear Regression."), 400
+    model, name = MODELS[key], info["models"][key]["name"]
+
     try:
         when = pd.to_datetime(request.args.get("datetime", ""))
     except Exception:
@@ -106,26 +116,28 @@ def predict():
 
     if day <= LAST_DATE:
         # Historical date: one-day-ahead prediction using only data before that day
-        pred = predict_next(close[close.index < day])
+        pred = predict_next(model, close[close.index < day])
         actual = float(close.loc[day])
         hist = close[(close.index >= day - pd.Timedelta(days=60)) & (close.index <= day + pd.Timedelta(days=20))]
+        band = 1.645 * RESID_STD[key]
         return jsonify(
-            mode="historical", date=fmt(day), predicted=pred, actual=actual,
+            mode="historical", model=key, model_name=name, date=fmt(day), predicted=pred, actual=actual,
             error_pct=abs(pred - actual) / actual * 100,
-            low=pred * np.exp(-1.645 * RESID_STD), high=pred * np.exp(1.645 * RESID_STD),
+            low=pred * np.exp(-band), high=pred * np.exp(band),
             history=series(hist),
         )
 
-    # Future date: Monte Carlo simulation driven by the model
+    # Future date: Monte Carlo simulation driven by the chosen model
     horizon = (day - LAST_DATE).days
-    sims = simulate(horizon)
+    sims = simulate(model, horizon)
     dates = [fmt(LAST_DATE + pd.Timedelta(days=i + 1)) for i in range(horizon)]
     q = {k: np.percentile(sims, v, axis=0).round(2).tolist()
          for k, v in {"p5": 5, "p25": 25, "p50": 50, "p75": 75, "p95": 95}.items()}
     final = sims[:, -1]
     last = float(close.iloc[-1])
     return jsonify(
-        mode="future", date=fmt(day), horizon=horizon, last_actual=last, last_date=fmt(LAST_DATE),
+        mode="future", model=key, model_name=name, date=fmt(day), horizon=horizon, last_actual=last,
+        last_date=fmt(LAST_DATE),
         predicted=float(np.median(final)), low=float(np.percentile(final, 5)), high=float(np.percentile(final, 95)),
         prob_up=float(np.mean(final > last) * 100),
         history=series(close.iloc[-120:]),

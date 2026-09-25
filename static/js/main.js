@@ -10,6 +10,11 @@ const usd = (v, d = 0) => "$" + Number(v).toLocaleString("en-US", { minimumFract
 const pct = (v, d = 2) => Number(v).toFixed(d) + "%";
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+// Always start at the top: the intro plays over the hero, and scroll animations are
+// registered while the loader is showing (a restored mid-page scroll would skip them).
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+window.scrollTo(0, 0);
+
 const scene = createScene($("#webgl"));
 
 // Smooth (inertial) scrolling with Lenis, driven by the same GSAP ticker that renders the
@@ -236,12 +241,55 @@ function scrollReveals() {
 }
 
 // ------------------------------------------------------------------ Marquee driven by scroll velocity
-function marquee(best) {
-  const items = [
-    ["Price accuracy", pct(best["Accuracy_%"])], ["R²", best.R2.toFixed(4)], ["MAE", usd(best.MAE)],
-    ["RMSE", usd(best.RMSE)], ["Direction hit-rate", pct(best["Direction_%"], 1)], ["Daily candles", META.n_days.toLocaleString()],
-    ["Minute rows", "7,616,181"], ["Model", META.best_model],
-  ];
+// ------------------------------------------------------------------ Model selection
+// Three models are offered: Random Forest (default), Ridge Regression and Linear Regression.
+let MODEL = null; // key of the selected model
+const modelListeners = [];
+const MODEL_COLORS = { random_forest: "#f7931a", ridge: "#7b5cff", linear: "#3ecf8e" };
+const MODEL_SHORT = { random_forest: "Random Forest", ridge: "Ridge", linear: "Linear" };
+const modelKeys = () => META.model_order;
+const M = (key = MODEL) => META.models[key];
+const onModelChange = (fn) => modelListeners.push(fn);
+
+function setModel(key) {
+  if (key === MODEL || !META.models[key]) return;
+  MODEL = key;
+  modelListeners.forEach((fn) => fn(key));
+}
+
+// Backtest error statistics for one model
+function modelErrors(key = MODEL) {
+  const act = META.backtest_actual, pred = M(key).backtest;
+  const errs = pred.map((p, i) => ((p - act[i]) / act[i]) * 100);
+  const within = [1, 2, 5].map((t) => (errs.filter((e) => Math.abs(e) <= t).length / errs.length) * 100);
+  return { errs, within };
+}
+
+// Segmented control rendered into every .model-switch placeholder; all copies stay in sync
+function modelSwitches() {
+  const switches = $$(".model-switch");
+  switches.forEach((sw) => {
+    sw.setAttribute("role", "radiogroup");
+    sw.setAttribute("aria-label", "Prediction model");
+    sw.innerHTML = `<span class="ms-pill"></span>` + modelKeys()
+      .map((k) => `<button type="button" role="radio" data-model="${k}">${M(k).name}</button>`).join("");
+    $$("button", sw).forEach((b) => b.addEventListener("click", () => setModel(b.dataset.model)));
+  });
+  const place = (animate) => switches.forEach((sw) => {
+    const btn = $(`button[data-model="${MODEL}"]`, sw);
+    $$("button", sw).forEach((b) => { b.classList.toggle("active", b === btn); b.setAttribute("aria-checked", b === btn); });
+    const vars = { x: btn.offsetLeft, width: btn.offsetWidth, backgroundColor: MODEL_COLORS[MODEL] };
+    if (animate) gsap.to($(".ms-pill", sw), { ...vars, duration: 0.6, ease: "expo.out" });
+    else gsap.set($(".ms-pill", sw), vars);
+  });
+  place(false);
+  onModelChange(() => place(true));
+  addEventListener("resize", () => place(false));
+}
+
+function marquee() {
+  const items = modelKeys().map((k) => [`${M(k).name} · price accuracy`, pct(M(k).metrics["Accuracy_%"])]);
+  items.push(["Daily candles", META.n_days.toLocaleString()], ["Minute rows", "7,616,181"], ["Test days", META.split.n_test]);
   const html = items.map(([k, v]) => `<span>${k}<b>${v}</b></span><span>✦</span>`).join("");
   $("#marquee").innerHTML = html + html;
   const loop = gsap.to("#marquee", { xPercent: -50, ease: "none", duration: 40, repeat: -1 });
@@ -254,67 +302,76 @@ function marquee(best) {
 }
 
 // ------------------------------------------------------------------ Accuracy gauges
-function gauges(best, within5) {
-  const R = 70, C = 2 * Math.PI * R;
-  const items = [
-    { label: "Price accuracy", val: best["Accuracy_%"], text: best["Accuracy_%"].toFixed(2), unit: "%", fill: best["Accuracy_%"] / 100,
-      color: "var(--accent)", desc: `100% minus the average % error (MAPE ${pct(best["MAPE_%"])})` },
-    { label: "R² score", val: best.R2, text: best.R2.toFixed(3), unit: "R²", fill: best.R2,
-      color: "var(--accent-2)", desc: "Share of the variation in price explained" },
-    { label: "Within ±5%", val: within5, text: within5.toFixed(1), unit: "%", fill: within5 / 100,
-      color: "var(--good)", desc: "Test days where the prediction landed within 5%" },
-    { label: "Direction hit-rate", val: best["Direction_%"], text: best["Direction_%"].toFixed(1), unit: "%", fill: best["Direction_%"] / 100,
-      color: "var(--violet)", desc: "Up/down calls that were right (50% = coin flip)" },
+function gauges() {
+  const R = 70;
+  const defs = [
+    { label: "Price accuracy", get: (m) => m["Accuracy_%"], dec: 2, max: 100, unit: "PERCENT", color: "var(--accent)",
+      desc: (m) => `100% minus the average % error (MAPE ${pct(m["MAPE_%"])})` },
+    { label: "R² score", get: (m) => m.R2, dec: 3, max: 1, unit: "SCORE", color: "var(--accent-2)",
+      desc: () => "Share of the variation in price explained" },
+    { label: "Within ±5%", get: (m, e) => e.within[2], dec: 1, max: 100, unit: "PERCENT", color: "var(--good)",
+      desc: () => "Test days where the prediction landed within 5%" },
+    { label: "Direction hit-rate", get: (m) => m["Direction_%"], dec: 1, max: 100, unit: "PERCENT", color: "var(--violet)",
+      desc: () => "Up/down calls that were right (50% = coin flip)" },
   ];
-  $("#gauges").innerHTML = items.map((g, i) => `
+  $("#gauges").innerHTML = defs.map((g, i) => `
     <div class="gauge glass">
       <svg viewBox="0 0 170 170">
         <circle class="g-track" cx="85" cy="85" r="${R}"/>
         <circle class="g-bar" id="gbar${i}" cx="85" cy="85" r="${R}" stroke="${g.color}" transform="rotate(-90 85 85)"/>
         <text class="g-val" x="85" y="90" text-anchor="middle" id="gval${i}">0</text>
-        <text class="g-unit" x="85" y="112" text-anchor="middle">${g.unit === "%" ? "PERCENT" : "SCORE"}</text>
+        <text class="g-unit" x="85" y="112" text-anchor="middle">${g.unit}</text>
       </svg>
-      <h3>${g.label}</h3><p>${g.desc}</p>
+      <h3>${g.label}</h3><p id="gdesc${i}"></p>
     </div>`).join("");
-  $("#dirInline").textContent = pct(best["Direction_%"], 1);
-  items.forEach((g, i) => {
-    const dec = g.text.split(".")[1]?.length || 0;
-    const o = { v: 0 };
-    const tl = gsap.timeline({ scrollTrigger: { trigger: "#gauges", start: "top 80%", toggleActions: "play none none reverse" } });
-    tl.fromTo(`#gbar${i}`, { drawSVG: "0%" }, { drawSVG: `${g.fill * 100}%`, duration: 2, ease: "expo.out", delay: i * 0.12 }, 0)
-      .to(o, { v: g.val, duration: 2, ease: "expo.out", delay: i * 0.12,
-        onUpdate: () => ($(`#gval${i}`).textContent = o.v.toFixed(dec)) }, 0);
-  });
+  gsap.set(defs.map((_, i) => `#gbar${i}`), { drawSVG: "0%" });
+  const cur = defs.map(() => ({ v: 0 }));
+  let shown = false;
+  const texts = (key) => {
+    const m = M(key).metrics;
+    $("#dirInline").textContent = pct(m["Direction_%"], 1);
+    defs.forEach((g, i) => ($(`#gdesc${i}`).textContent = g.desc(m)));
+  };
+  const apply = (key, duration, step) => {
+    const m = M(key).metrics, e = modelErrors(key);
+    texts(key);
+    defs.forEach((g, i) => {
+      const v = g.get(m, e);
+      gsap.to(`#gbar${i}`, { drawSVG: `${(v / g.max) * 100}%`, duration, delay: i * step, ease: "expo.out", overwrite: true });
+      gsap.to(cur[i], { v, duration, delay: i * step, ease: "expo.out", overwrite: true,
+        onUpdate: () => ($(`#gval${i}`).textContent = cur[i].v.toFixed(g.dec)) });
+    });
+  };
+  texts(MODEL);
+  ScrollTrigger.create({ trigger: "#gauges", start: "top 80%", once: true, onEnter: () => { shown = true; apply(MODEL, 2, 0.12); } });
+  onModelChange((key) => (shown ? apply(key, 1.2, 0.06) : texts(key)));
 }
 
 // ------------------------------------------------------------------ Backtest section
 function backtestSection() {
-  const bt = META.backtest;
+  const dates = META.backtest_dates, act = META.backtest_actual, pv = M().backtest, color = MODEL_COLORS[MODEL];
   const svg = $("#backtestChart");
-  const ms = bt.dates.map(toMs);
-  const all = bt.actual.concat(bt.predicted);
+  const ms = dates.map(toMs);
+  const all = act.concat(pv);
   const f = frame(svg, [ms[0], ms[ms.length - 1]], [Math.min(...all), Math.max(...all)]);
   const xs = ms.map(f.x);
-  el("path", { d: areaPath(xs, bt.actual.map(f.y), xs.map(() => f.h - f.m.b)), fill: gradient(f.defs, "btArea", "#8d93a8", 0.18, 0), class: "bt-area" }, f.layer);
-  const actual = el("path", { class: "line", d: linePath(xs, bt.actual.map(f.y)), stroke: "#8d93a8" }, f.layer);
-  const pred = el("path", { class: "line", d: linePath(xs, bt.predicted.map(f.y)), stroke: "#f7931a", "stroke-width": 1.5 }, f.layer);
-  attachTooltip(svg, $("#bTip"), f, bt.dates, [
-    { label: "Actual", color: "#8d93a8", values: bt.actual },
-    { label: "Predicted", color: "#f7931a", values: bt.predicted },
+  el("path", { d: areaPath(xs, act.map(f.y), xs.map(() => f.h - f.m.b)), fill: gradient(f.defs, "btArea", "#8d93a8", 0.18, 0), class: "bt-area" }, f.layer);
+  const actual = el("path", { class: "line", d: linePath(xs, act.map(f.y)), stroke: "#8d93a8" }, f.layer);
+  const pred = el("path", { class: "line", d: linePath(xs, pv.map(f.y)), stroke: color, "stroke-width": 1.5 }, f.layer);
+  $("#btPredLegend").innerHTML = `<i style="background:${color}"></i>Predicted · ${M().name}`;
+  attachTooltip(svg, $("#bTip"), f, dates, [
+    { label: "Actual", color: "#8d93a8", values: act },
+    { label: MODEL_SHORT[MODEL], color, values: pv },
   ]);
   return { actual, pred, area: $(".bt-area", svg) };
 }
 
-function backtestAnimations() {
-  const { actual, pred, area } = backtestSection();
-  gsap.timeline({ scrollTrigger: { trigger: "#backtestChart", start: "top 85%", end: "bottom 45%", scrub: 0.6 } })
-    .fromTo(actual, { drawSVG: "0%" }, { drawSVG: "100%", ease: "none" }, 0)
-    .fromTo(pred, { drawSVG: "0%" }, { drawSVG: "100%", ease: "none" }, 0.08)
-    .fromTo(area, { opacity: 0 }, { opacity: 1, ease: "none" }, 0.5);
-
-  // Error histogram
-  const bt = META.backtest;
-  const errs = bt.predicted.map((p, i) => ((p - bt.actual[i]) / bt.actual[i]) * 100);
+let panelTriggers = [];
+function errorPanels(initial) {
+  panelTriggers.forEach((t) => t.kill());
+  panelTriggers = [];
+  const { errs, within } = modelErrors();
+  const color = MODEL_COLORS[MODEL];
   const lo = -8, hi = 8, bw = 0.5, nb = (hi - lo) / bw;
   const counts = new Array(nb).fill(0);
   errs.forEach((e) => { const k = Math.floor((gsap.utils.clamp(lo, hi - 1e-6, e) - lo) / bw); counts[k]++; });
@@ -327,45 +384,233 @@ function backtestAnimations() {
     const x0 = lo + k * bw, bh = (c / max) * (h - 36);
     const center = Math.abs(x0 + bw / 2) <= 1;
     return el("rect", { x: 10 + k * bwPx + 1, y: h - 22 - bh, width: bwPx - 2, height: bh, rx: 2,
-      fill: center ? "#f7931a" : "#7b5cff", opacity: center ? 1 : 0.7 }, svg);
+      fill: center ? color : "#8d93a8", opacity: center ? 1 : 0.55 }, svg);
   });
   [-8, -4, 0, 4, 8].forEach((v) => {
     const t = el("text", { x: 10 + ((v - lo) / (hi - lo)) * (w - 20), y: h - 6, "text-anchor": "middle", fill: "#8d93a8", "font-size": 11, "font-family": "JetBrains Mono" }, svg);
     t.textContent = (v > 0 ? "+" : "") + v + "%";
   });
-  gsap.from(bars, { scaleY: 0, transformOrigin: "50% 100%", duration: 1, stagger: { each: 0.02, from: "center" }, ease: "back.out(1.6)",
-    scrollTrigger: { trigger: svg, start: "top 85%", toggleActions: "play none none reverse" } });
+  const barAnim = { scaleY: 0, transformOrigin: "50% 100%", duration: 1, stagger: { each: 0.02, from: "center" }, ease: "back.out(1.6)" };
 
-  // Within ±x%
-  const within = [1, 2, 5].map((t) => (errs.filter((e) => Math.abs(e) <= t).length / errs.length) * 100);
   $("#within").innerHTML = within.map((v, i) => `
-    <div class="within-row"><span>±${[1, 2, 5][i]}%</span><div class="within-bar"><span data-v="${v}"></span></div><span class="wv" data-v="${v}">0%</span></div>`).join("");
-  const tl = gsap.timeline({ scrollTrigger: { trigger: "#within", start: "top 85%", toggleActions: "play none none reverse" } });
+    <div class="within-row"><span>±${[1, 2, 5][i]}%</span><div class="within-bar"><span data-v="${v}" style="background:linear-gradient(90deg, var(--violet), ${color})"></span></div><span class="wv" data-v="${v}">0%</span></div>`).join("");
+  const tl = gsap.timeline({ paused: initial });
   $$("#within .within-bar span").forEach((s, i) => tl.to(s, { scaleX: +s.dataset.v / 100, duration: 1.4, ease: "expo.out" }, i * 0.12));
   $$("#within .wv").forEach((s, i) => {
     const o = { v: 0 };
     tl.to(o, { v: +s.dataset.v, duration: 1.4, ease: "expo.out", onUpdate: () => (s.textContent = o.v.toFixed(1) + "%") }, i * 0.12);
   });
-  return within[2];
+
+  if (initial) {
+    const hist = gsap.from(bars, { ...barAnim, paused: true });
+    panelTriggers.push(
+      ScrollTrigger.create({ trigger: svg, start: "top 85%", animation: hist, toggleActions: "play none none reverse" }),
+      ScrollTrigger.create({ trigger: "#within", start: "top 85%", animation: tl, toggleActions: "play none none reverse" }));
+  } else {
+    gsap.from(bars, barAnim);
+  }
+}
+
+let btScrub = null;
+function backtestAnimations() {
+  const { actual, pred, area } = backtestSection();
+  btScrub = gsap.timeline({ scrollTrigger: { trigger: "#backtestChart", start: "top 85%", end: "bottom 45%", scrub: 0.6 } })
+    .fromTo(actual, { drawSVG: "0%" }, { drawSVG: "100%", ease: "none" }, 0)
+    .fromTo(pred, { drawSVG: "0%" }, { drawSVG: "100%", ease: "none" }, 0.08)
+    .fromTo(area, { opacity: 0 }, { opacity: 1, ease: "none" }, 0.5);
+  errorPanels(true);
+  onModelChange(() => {
+    if (btScrub) { btScrub.scrollTrigger.kill(); btScrub.kill(); btScrub = null; }
+    const { pred: p } = backtestSection();
+    gsap.fromTo(p, { drawSVG: "0%" }, { drawSVG: "100%", duration: 1.4, ease: "power2.inOut" });
+    errorPanels(false);
+  });
 }
 
 // ------------------------------------------------------------------ Models table
 function modelsTable() {
-  const res = META.results;
-  const maxMae = Math.max(...Object.values(res).map((r) => r.MAE));
-  const order = Object.entries(res).sort((a, b) => (a[0] === "Naive Baseline" ? -1 : b[0] === "Naive Baseline" ? 1 : a[1].MAE - b[1].MAE));
-  const rows = order.map(([name, r]) => `
-    <tr class="${name === META.best_model ? "best" : ""}">
-      <td>${name}${name === META.best_model ? '<span class="tag">IN USE</span>' : ""}${name === "Naive Baseline" ? '<span class="tag" style="background:rgba(255,255,255,.06);color:var(--muted)">BASELINE</span>' : ""}</td>
+  const keys = modelKeys();
+  const maxMae = Math.max(...keys.map((k) => M(k).metrics.MAE));
+  const rows = keys.map((k) => {
+    const r = M(k).metrics;
+    return `
+    <tr data-model="${k}" tabindex="0" title="Use ${M(k).name} for predictions">
+      <td><i class="mdot" style="background:${MODEL_COLORS[k]}"></i>${M(k).name}<span class="tag">SELECTED</span></td>
       <td><span class="bar" style="width:${(r.MAE / maxMae) * 90}px"></span>${usd(r.MAE)}</td>
       <td>${usd(r.RMSE)}</td><td>${r.R2.toFixed(4)}</td><td>${pct(r["Accuracy_%"])}</td>
-      <td>${r["Direction_%"] != null ? pct(r["Direction_%"], 1) : "—"}</td>
-    </tr>`).join("");
-  $("#modelTable").innerHTML = `<thead><tr><th>Model</th><th>MAE</th><th>RMSE</th><th>R²</th><th>Price acc.</th><th>Direction</th></tr></thead><tbody>${rows}</tbody>`;
+      <td>${pct(r["Direction_%"], 1)}</td><td>${r.Fit_Status}</td>
+    </tr>`;
+  }).join("");
+  $("#modelTable").innerHTML = `<thead><tr><th>Model</th><th>MAE</th><th>RMSE</th><th>R²</th><th>Price acc.</th><th>Direction</th><th>Diagnosis</th></tr></thead><tbody>${rows}</tbody>`;
+  $$("#modelTable tbody tr").forEach((tr) => {
+    tr.addEventListener("click", () => setModel(tr.dataset.model));
+    tr.addEventListener("keydown", (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setModel(tr.dataset.model)));
+  });
+  const mark = () => $$("#modelTable tbody tr").forEach((tr) => tr.classList.toggle("best", tr.dataset.model === MODEL));
+  mark();
+  onModelChange(() => {
+    mark();
+    gsap.fromTo("#modelTable tr.best td", { backgroundColor: "rgba(247,147,26,.18)" }, { backgroundColor: "rgba(247,147,26,0)", duration: 1.2 });
+  });
   const tl = gsap.timeline({ scrollTrigger: { trigger: "#modelTable", start: "top 80%", toggleActions: "play none none reverse" } });
   tl.from("#modelTable th", { opacity: 0, y: -10, stagger: 0.05, duration: 0.6 })
     .from("#modelTable tbody tr", { opacity: 0, x: -50, stagger: 0.12, duration: 0.9, ease: "expo.out" }, 0.1)
     .from("#modelTable .bar", { scaleX: 0, stagger: 0.12, duration: 1.2, ease: "expo.out" }, 0.3);
+}
+
+// ------------------------------------------------------------------ Evaluation dashboard
+function evaluationDashboard() {
+  const keys = modelKeys();
+  const st = (trigger) => ({ trigger, start: "top 82%", toggleActions: "play none none reverse" });
+  const box = (svg, W, H) => { svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = ""; return svg; };
+  const txt = (parent, x, y, s, attrs = {}) => { const t = el("text", { x, y, ...attrs }, parent); t.textContent = s; return t; };
+  const tip = (node, s) => { el("title", {}, node).textContent = s; };
+  const hl = (node, key) => { node.classList.add("ev-hl"); node.dataset.model = key; return node; };
+
+  // 1. Direction accuracy bars
+  {
+    const W = 480, Hh = 260, m = { l: 40, r: 8, t: 18, b: 30 };
+    const svg = box($("#evAcc"), W, Hh), lo = 40, hi = 60, H = Hh - m.t - m.b, bw = (W - m.l - m.r) / keys.length;
+    const y = (v) => m.t + H - ((Math.max(v, lo) - lo) / (hi - lo)) * H;
+    [40, 45, 50, 55, 60].forEach((v) => {
+      el("line", { class: "gridline", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg);
+      txt(svg, m.l - 6, y(v) + 4, v + "%", { "text-anchor": "end" });
+    });
+    const bars = keys.map((k, i) => {
+      const v = M(k).metrics["Direction_%"], x = m.l + i * bw + bw * 0.25, w = bw * 0.5;
+      const g = hl(el("g", {}, svg), k);
+      const r = el("rect", { x, y: y(v), width: w, height: y(lo) - y(v), rx: 6, fill: MODEL_COLORS[k] }, g);
+      tip(r, `${M(k).name}: ${v.toFixed(2)}%`);
+      txt(g, x + w / 2, y(v) - 6, v.toFixed(1) + "%", { "text-anchor": "middle", class: "val" });
+      txt(svg, x + w / 2, Hh - 10, MODEL_SHORT[k], { "text-anchor": "middle" });
+      return r;
+    });
+    const coin = el("line", { x1: m.l, x2: W - m.r, y1: y(50), y2: y(50), stroke: "#ff6b6b", "stroke-dasharray": "4 4" }, svg);
+    txt(svg, W - m.r, y(50) - 5, "coin flip 50%", { "text-anchor": "end", fill: "#ff6b6b" });
+    gsap.timeline({ scrollTrigger: st(svg) })
+      .from(bars, { scaleY: 0, transformOrigin: "50% 100%", duration: 1, stagger: 0.1, ease: "expo.out" })
+      .fromTo(coin, { drawSVG: "0%" }, { drawSVG: "100%", duration: 0.8 }, 0.3);
+  }
+
+  // 2. Precision / Recall / F1 grouped bars
+  {
+    const W = 480, Hh = 240, m = { l: 36, r: 8, t: 10, b: 30 };
+    const svg = box($("#evPrf"), W, Hh), H = Hh - m.t - m.b, gw = (W - m.l - m.r) / keys.length;
+    const y = (v) => m.t + H - v * H;
+    const metrics = [["Precision", "#f7931a"], ["Recall", "#7b5cff"], ["F1", "#3ecf8e"]];
+    $("#evPrfLegend").innerHTML = metrics.map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join("");
+    [0, 0.25, 0.5, 0.75, 1].forEach((v) => {
+      el("line", { class: "gridline", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg);
+      txt(svg, m.l - 6, y(v) + 4, v.toFixed(2), { "text-anchor": "end" });
+    });
+    const bars = [];
+    keys.forEach((k, i) => {
+      const bw = gw * 0.22, g = hl(el("g", {}, svg), k);
+      metrics.forEach(([name, c], j) => {
+        const v = M(k).metrics[name], x = m.l + i * gw + gw * 0.17 + j * bw;
+        const r = el("rect", { x, y: y(v), width: bw - 3, height: y(0) - y(v), rx: 3, fill: c }, g);
+        tip(r, `${M(k).name} · ${name}: ${v.toFixed(3)}`);
+        bars.push(r);
+      });
+      txt(svg, m.l + i * gw + gw / 2, Hh - 10, MODEL_SHORT[k], { "text-anchor": "middle" });
+    });
+    gsap.from(bars, { scaleY: 0, transformOrigin: "50% 100%", duration: 0.9, stagger: 0.04, ease: "expo.out", scrollTrigger: st(svg) });
+  }
+
+  // 3. Confusion matrix (selected model)
+  let cmShown = false;
+  const drawCM = (animate) => {
+    const cmx = M().confusion_matrix, max = Math.max(...cmx.flat());
+    $("#evCmModel").textContent = M().name;
+    const cell = (v, tag, good) => {
+      const a = 0.12 + 0.5 * (v / max);
+      return `<div class="cell" style="background:rgba(${good ? "62,207,142" : "255,107,107"},${a.toFixed(2)})"><b data-v="${v}">${animate ? 0 : v}</b><span>${tag}</span></div>`;
+    };
+    const [[tn, fp], [fn, tp]] = cmx, total = tn + fp + fn + tp;
+    $("#evCm").innerHTML = `
+      <div></div><div class="h">Predicted DOWN</div><div class="h">Predicted UP</div>
+      <div class="h">Actual DOWN</div>${cell(tn, "TRUE NEG", true)}${cell(fp, "FALSE POS", false)}
+      <div class="h">Actual UP</div>${cell(fn, "FALSE NEG", false)}${cell(tp, "TRUE POS", true)}
+      <p class="cm-note">Accuracy ${(((tn + tp) / total) * 100).toFixed(1)}% · Precision ${((tp / Math.max(tp + fp, 1)) * 100).toFixed(1)}%
+        · Recall ${((tp / Math.max(tp + fn, 1)) * 100).toFixed(1)}% on ${total} test days</p>`;
+    if (!animate) return;
+    const tl = gsap.timeline();
+    tl.from("#evCm .cell", { scale: 0.6, opacity: 0, duration: 0.8, stagger: 0.1, ease: "back.out(1.7)" });
+    $$("#evCm .cell b").forEach((b) => {
+      const o = { v: 0 };
+      tl.to(o, { v: +b.dataset.v, duration: 1.2, ease: "expo.out", onUpdate: () => (b.textContent = Math.round(o.v)) }, 0.1);
+    });
+  };
+  drawCM(false);
+  ScrollTrigger.create({ trigger: "#evCm", start: "top 82%", once: true, onEnter: () => { cmShown = true; drawCM(true); } });
+
+  // 4. ROC curves
+  const rocLines = {};
+  {
+    const S = 300, m = { l: 36, r: 10, t: 10, b: 34 }, W = S - m.l - m.r, H = S - m.t - m.b;
+    const svg = box($("#evRoc"), S, S);
+    const x = (v) => m.l + v * W, y = (v) => m.t + H - v * H;
+    [0, 0.5, 1].forEach((v) => {
+      el("line", { class: "gridline", x1: m.l, x2: m.l + W, y1: y(v), y2: y(v) }, svg);
+      txt(svg, m.l - 6, y(v) + 4, v, { "text-anchor": "end" });
+      txt(svg, x(v), S - 18, v, { "text-anchor": "middle" });
+    });
+    txt(svg, m.l + W / 2, S - 2, "false positive rate →", { "text-anchor": "middle" });
+    const diag = el("line", { x1: x(0), y1: y(0), x2: x(1), y2: y(1), stroke: "rgba(255,255,255,.35)", "stroke-dasharray": "4 4" }, svg);
+    const lines = keys.map((k) => (rocLines[k] = hl(el("path", {
+      d: linePath(M(k).roc.fpr.map(x), M(k).roc.tpr.map(y)), fill: "none", stroke: MODEL_COLORS[k], "stroke-width": 2 }, svg), k)));
+    $("#evRocLegend").innerHTML = keys.map((k) => `<span><i style="background:${MODEL_COLORS[k]}"></i>${MODEL_SHORT[k]} AUC ${M(k).metrics.AUC.toFixed(3)}</span>`).join("")
+      + `<span><i style="background:rgba(255,255,255,.35)"></i>random 0.500</span>`;
+    gsap.timeline({ scrollTrigger: st(svg) })
+      .fromTo(diag, { drawSVG: "0%" }, { drawSVG: "100%", duration: 0.6 })
+      .fromTo(lines, { drawSVG: "0%" }, { drawSVG: "100%", duration: 1.4, stagger: 0.15, ease: "power2.inOut" }, 0.2);
+  }
+
+  // 5. CV spread box plot
+  {
+    const Wd = 480, Hh = 260, m = { l: 40, r: 8, t: 12, b: 30 };
+    const svg = box($("#evCv"), Wd, Hh);
+    const all = keys.flatMap((k) => M(k).cv_folds.dir_acc.map((v) => v * 100));
+    const lo = Math.floor(Math.min(...all, 46) / 2) * 2, hi = Math.ceil(Math.max(...all, 54) / 2) * 2;
+    const H = Hh - m.t - m.b, gw = (Wd - m.l - m.r) / keys.length;
+    const y = (v) => m.t + H - ((v - lo) / (hi - lo)) * H;
+    niceTicks(lo, hi, 4).forEach((v) => {
+      el("line", { class: "gridline", x1: m.l, x2: Wd - m.r, y1: y(v), y2: y(v) }, svg);
+      txt(svg, m.l - 6, y(v) + 4, v + "%", { "text-anchor": "end" });
+    });
+    el("line", { x1: m.l, x2: Wd - m.r, y1: y(50), y2: y(50), stroke: "#ff6b6b", "stroke-dasharray": "4 4" }, svg);
+    const q = (arr, p) => { const a = [...arr].sort((u, v) => u - v), i = (a.length - 1) * p, f = Math.floor(i); return a[f] + (a[Math.ceil(i)] - a[f]) * (i - f); };
+    const groups = keys.map((k, i) => {
+      const v = M(k).cv_folds.dir_acc.map((d) => d * 100), cx = m.l + i * gw + gw / 2, bw = gw * 0.34, c = MODEL_COLORS[k];
+      const g = hl(el("g", {}, svg), k);
+      el("line", { x1: cx, x2: cx, y1: y(Math.min(...v)), y2: y(Math.max(...v)), stroke: c, "stroke-width": 1.5 }, g);
+      el("rect", { x: cx - bw / 2, y: y(q(v, 0.75)), width: bw, height: Math.max(y(q(v, 0.25)) - y(q(v, 0.75)), 2), rx: 4,
+        fill: c, "fill-opacity": 0.35, stroke: c }, g);
+      el("line", { x1: cx - bw / 2, x2: cx + bw / 2, y1: y(q(v, 0.5)), y2: y(q(v, 0.5)), stroke: "#fff", "stroke-width": 2 }, g);
+      v.forEach((d, j) => el("circle", { cx: cx + (j - 2) * 6, cy: y(d), r: 3, fill: c }, g));
+      txt(svg, cx, Hh - 10, MODEL_SHORT[k], { "text-anchor": "middle" });
+      const mean = v.reduce((a, b) => a + b, 0) / v.length;
+      const sd = Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / v.length);
+      tip(g, `${M(k).name}: mean ${mean.toFixed(1)}% ± ${sd.toFixed(1)}% over 5 folds`);
+      return g;
+    });
+    gsap.from(groups, { opacity: 0, y: 30, duration: 0.9, stagger: 0.12, ease: "expo.out", scrollTrigger: st(svg) });
+  }
+
+  // Highlight the selected model in every chart
+  const highlight = (animate) => {
+    $$("#evaluation .ev-hl").forEach((n) => {
+      const on = n.dataset.model === MODEL;
+      gsap.to(n, { opacity: on ? 1 : 0.35, duration: animate ? 0.5 : 0 });
+      n.classList.toggle("selected", on);
+    });
+    Object.entries(rocLines).forEach(([k, p]) => p.setAttribute("stroke-width", k === MODEL ? 3.2 : 1.6));
+  };
+  highlight(false);
+  onModelChange(() => {
+    highlight(true);
+    drawCM(cmShown);
+  });
 }
 
 // ------------------------------------------------------------------ Pinned horizontal pipeline
@@ -406,6 +651,7 @@ function sceneTimeline() {
     { sel: "#predict", coin: [mob ? 0 : 4, 2.6, -2], rot: [-0.3, 0, -0.4], s: 0.45, cam: [0, 0.3, 10], look: [0, 0, 0], ribbon: 0.05 },
     { sel: "#backtest", coin: [0, 4.5, -3], rot: [1.2, 0, 0], s: 0.35, cam: [0, -1.2, 7.5], look: [0, -1.4, -6], ribbon: 1 },
     { sel: "#models", coin: [mob ? 0 : -3.4, 0.4, 0], rot: [0.2, 0, 0.5], s: 0.8, cam: [0, 0, 9.5], look: [0, 0, 0], ribbon: 1 },
+    { sel: "#evaluation", coin: [mob ? 0 : 4.6, 2.7, -3], rot: [0.5, 0, -0.3], s: 0.4, cam: [0, 0, 10], look: [0, 0, 0], ribbon: 1 },
     { sel: "#pipeline", coin: [mob ? 0 : 4.4, 2.4, -3], rot: [0.3, 0, 0], s: 0.55, cam: [0, 0.4, 10], look: [0, 0, 0], ribbon: 1 },
     { sel: ".footer", coin: [mob ? 0 : 2.8, 0.2, 1], rot: [-0.2, 0, -0.2], s: 1, cam: [0, 0, 8], look: [0, 0, 0], ribbon: 1 },
   ];
@@ -458,16 +704,18 @@ function setupPredict() {
     gsap.fromTo(c, { scale: 0.9 }, { scale: 1, duration: 0.6, ease: "elastic.out(1,0.4)" });
   }));
 
-  let lastData = null;
+  let lastData = null, busy = false;
   $("#predictForm").addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (busy) return;
+    busy = true;
     const btn = $("#predictBtn");
     btn.disabled = true;
     $("span", btn).textContent = "Simulating…";
     const spin = gsap.to(scene.state, { idleSpeed: 6, duration: 0.8, ease: "power2.in" });
     const arrow = gsap.to($("svg", btn), { x: 6, repeat: -1, yoyo: true, duration: 0.3, ease: "sine.inOut" });
     try {
-      const r = await fetch("/predict?datetime=" + encodeURIComponent(input.value));
+      const r = await fetch(`/predict?model=${MODEL}&datetime=` + encodeURIComponent(input.value));
       const d = await r.json();
       if (d.error) return showError(d.error);
       lastData = d;
@@ -482,8 +730,10 @@ function setupPredict() {
       gsap.set($("svg", btn), { x: 0 });
       btn.disabled = false;
       $("span", btn).textContent = "Run prediction";
+      busy = false;
     }
   });
+  onModelChange(() => lastData && $("#predictForm").requestSubmit());
   let rt;
   addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => lastData && drawForecast(lastData, false), 200); });
 }
@@ -501,13 +751,13 @@ function showResult(d) {
   const stat = (k, v, cls = "") => `<div class="rstat"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
   let s = "";
   if (d.mode === "historical") {
-    $("#rLabel").textContent = `Model prediction for ${d.date} · historical check`;
+    $("#rLabel").textContent = `${d.model_name} · prediction for ${d.date} · historical check`;
     s += stat("Actual close", usd(d.actual, 2));
     s += stat("Error", pct(d.error_pct), d.error_pct < 3 ? "up" : "down");
     s += stat("90% range", `${usd(d.low)} – ${usd(d.high)}`);
   } else {
     const chg = (d.predicted / d.last_actual - 1) * 100;
-    $("#rLabel").textContent = `Median forecast for ${d.date} · ${d.horizon} days ahead`;
+    $("#rLabel").textContent = `${d.model_name} · median forecast for ${d.date} · ${d.horizon} days ahead`;
     s += stat("vs last close", (chg >= 0 ? "+" : "") + pct(chg), chg >= 0 ? "up" : "down");
     s += stat("Chance it's higher", pct(d.prob_up, 0), d.prob_up >= 50 ? "up" : "down");
     s += stat("90% range", `${usd(d.low)} – ${usd(d.high)}`);
@@ -611,16 +861,23 @@ let intro = null;
 // so nothing heavy happens after the reveal.
 const ready = Promise.all([dataPromise, document.fonts.ready]).then(async ([meta]) => {
   META = meta;
-  const best = META.results[META.best_model];
+  MODEL = META.default_model; // Random Forest
   $("#tLast").textContent = usd(META.last_close);
-  $("#tModel").textContent = META.best_model;
+  $("#tModel").textContent = M().name;
+  onModelChange(() => {
+    $("#tModel").textContent = M().name;
+    gsap.fromTo("#tModel", { yPercent: 60, opacity: 0 }, { yPercent: 0, opacity: 1, duration: 0.6, ease: "expo.out" });
+    gsap.to(scene.state, { spin: scene.state.spin + Math.PI * 2, duration: 1.4, ease: "expo.out" });
+  });
   scene.setPriceHistory(META.weekly.prices);
 
   cursor();
-  marquee(best);
-  const within5 = backtestAnimations();
-  gauges(best, within5);
+  modelSwitches();
+  marquee();
+  backtestAnimations();
+  gauges();
   modelsTable();
+  evaluationDashboard();
   setupPredict();
   pipeline();
   scrollReveals();
@@ -645,4 +902,7 @@ const ready = Promise.all([dataPromise, document.fonts.ready]).then(async ([meta
 runLoader(ready, () => {
   intro.play();
   ambientLoops();
-}).then(() => lenis.start());
+}).then(() => {
+  lenis.start();
+  ScrollTrigger.update();
+});

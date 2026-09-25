@@ -1,0 +1,7 @@
+Column,Type,Group,Description,Unit,Non-null,Unique values (cardinality),Min,Max
+Timestamp,int64,Time,"Start of the 1-minute interval (Unix epoch, UTC)",seconds,7616181,7616181,1325376060.0,1782346860.0
+Open,float64,Price,First traded price in the minute,USD,7616181,1786431,3.8,126202.0
+High,float64,Price,Highest traded price in the minute,USD,7616181,1750669,3.8,126272.0
+Low,float64,Price,Lowest traded price in the minute,USD,7616181,1761877,3.8,126158.0
+Close,float64,Price (target source),Last traded price in the minute,USD,7616181,1778803,3.8,126202.0
+Volume,float64,Activity,Amount of BTC traded in the minute,BTC,7616181,5503448,0.0,5853.85216588
